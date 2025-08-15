@@ -35,6 +35,49 @@ const (
 
 const FramesPerBufferUnspecified = C.paFramesPerBufferUnspecified
 
+type StreamCallback = func(in, out []byte)
+
+// StreamCallbackTimeInfo contains timing information for the
+// buffers passed to the stream callback.
+type StreamCallbackTimeInfo struct {
+	InputBufferAdcTime, CurrentTime, OutputBufferDacTime time.Duration
+}
+
+// StreamCallbackFlags are flag bit constants for the statusFlags to StreamCallback.
+type StreamCallbackFlags C.PaStreamCallbackFlags
+
+// PortAudio stream callback flags.
+const (
+	// In a stream opened with FramesPerBufferUnspecified,
+	// InputUnderflow indicates that input data is all silence (zeros)
+	// because no real data is available.
+	//
+	// In a stream opened without FramesPerBufferUnspecified,
+	// InputUnderflow indicates that one or more zero samples have been inserted
+	// into the input buffer to compensate for an input underflow.
+	InputUnderflow StreamCallbackFlags = C.paInputUnderflow
+
+	// In a stream opened with FramesPerBufferUnspecified,
+	// indicates that data prior to the first sample of the
+	// input buffer was discarded due to an overflow, possibly
+	// because the stream callback is using too much CPU time.
+	//
+	// Otherwise indicates that data prior to one or more samples
+	// in the input buffer was discarded.
+	InputOverflow StreamCallbackFlags = C.paInputOverflow
+
+	// Indicates that output data (or a gap) was inserted,
+	// possibly because the stream callback is using too much CPU time.
+	OutputUnderflow StreamCallbackFlags = C.paOutputUnderflow
+
+	// Indicates that output data will be discarded because no room is available.
+	OutputOverflow StreamCallbackFlags = C.paOutputOverflow
+
+	// Some of all of the output data will be used to prime the stream,
+	// input data may be zero.
+	PrimingOutput StreamCallbackFlags = C.paPrimingOutput
+)
+
 // StreamDeviceParameters specifies parameters for
 // one device (either input or output) in a stream.
 // A nil Device indicates that no device is to be used
@@ -43,6 +86,10 @@ type StreamDeviceParameters struct {
 	Device           *DeviceInfo
 	ChannelCount     int
 	SuggestedLatency time.Duration
+}
+
+func (p StreamDeviceParameters) Exists() bool {
+	return p.Device != nil
 }
 
 // StreamParameters includes all parameters required to
@@ -55,10 +102,16 @@ type StreamParameters struct {
 	Flags           StreamFlags
 }
 
+type StreamInfo struct {
+	InputLatency, OutputLatency time.Duration
+	SampleRate                  float64
+}
+
 type Stream struct {
 	paStream unsafe.Pointer
 	params   *StreamParameters
 	in, out  []byte
+	cb       StreamCallback
 }
 
 func newStream(params *StreamParameters) *Stream {
@@ -67,13 +120,32 @@ func newStream(params *StreamParameters) *Stream {
 	}
 }
 
-// GetCpuLoad returns CPU usage information for the stream.
+// CpuLoad returns CPU usage information for the stream.
 // The "CPU Load" is a fraction of total CPU time consumed by
 // a callback stream's audio processing routines including,
 // but not limited to the client supplied stream callback.
 // This function does not work with blocking read/write streams.
-func (s *Stream) GetCpuLoad() float64 {
+func (s *Stream) CpuLoad() float64 {
 	return float64(C.Pa_GetStreamCpuLoad(s.paStream))
+}
+
+// Time returns the current time in seconds for a lifespan of a stream.
+// Starting and stopping the stream does not affect the passage of time.
+func (s *Stream) Time() time.Duration {
+	return duration(C.Pa_GetStreamTime(s.paStream))
+}
+
+// Info returns information about the stream.
+func (s *Stream) Info() *StreamInfo {
+	info := C.Pa_GetStreamInfo(s.paStream)
+	if info == nil {
+		return nil
+	}
+	return &StreamInfo{
+		duration(info.inputLatency),
+		duration(info.outputLatency),
+		float64(info.sampleRate),
+	}
 }
 
 // Start commences audio processing.
@@ -92,6 +164,7 @@ func (s *Stream) Close() error {
 	return goError(C.Pa_CloseStream(s.paStream))
 }
 
+// Abort terminates audio processing immediately without waiting for pending buffers to complete.
 func (s *Stream) Abort() error {
 	return goError(C.Pa_AbortStream(s.paStream))
 }
@@ -114,28 +187,38 @@ func (s *Stream) WriteAvailable() (int, error) {
 	return int(size), nil
 }
 
-func (s *Stream) Read(ptr unsafe.Pointer) error {
-	err := goError(C.Pa_ReadStream(s.paStream, ptr, C.ulong(s.params.FramesPerBuffer)))
+func (s *Stream) Read() ([]byte, error) {
+	err := goError(C.Pa_ReadStream(s.paStream, unsafe.Pointer(&s.in[0]), C.ulong(s.params.FramesPerBuffer)))
 	if err != nil {
+		return nil, err
+	}
+	return s.in, nil
+}
+
+func (s *Stream) Write(data []byte) error {
+	size := len(data) - 1
+	for i := range s.out {
+		if i > size {
+			break
+		} else {
+			s.out[i] = data[i]
+		}
+	}
+	err := goError(C.Pa_WriteStream(s.paStream, unsafe.Pointer(&s.out[0]), C.ulong(s.params.FramesPerBuffer)))
+	if err != nil {
+		if err == OutputUnderflowed {
+			return nil
+		}
 		return err
 	}
 	return nil
 }
 
-func (s *Stream) Write(ptr unsafe.Pointer) error {
-	err := goError(C.Pa_WriteStream(s.paStream, ptr, C.ulong(s.params.FramesPerBuffer)))
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func OpenStream(
-	params *StreamParameters,
-) (*Stream, error) {
+func OpenStream(params *StreamParameters, cb StreamCallback) (*Stream, error) {
 	s := newStream(params)
 	inParams := paStreamParameters(params.Input, params.SampleFormat)
 	outParams := paStreamParameters(params.Output, params.SampleFormat)
+
 	err := goError(
 		C.Pa_OpenStream(
 			&s.paStream,
@@ -149,7 +232,18 @@ func OpenStream(
 		),
 	)
 	if err != nil {
+		s.cb = cb
 		return nil, err
+	}
+	if cb != nil {
+		return s, nil
+	}
+	size := SampleSize(params.SampleFormat) * int(params.FramesPerBuffer)
+	if params.Input.Exists() {
+		s.in = make([]byte, size*params.Input.ChannelCount)
+	}
+	if params.Output.Exists() {
+		s.out = make([]byte, size*params.Output.ChannelCount)
 	}
 	return s, nil
 }
@@ -183,20 +277,14 @@ func HighLatencyParameters(in, out *DeviceInfo) *StreamParameters {
 	if in != nil {
 		p := &params.Input
 		p.Device = in
-		p.ChannelCount = 1
-		if in.MaxInputChannels < 1 {
-			p.ChannelCount = in.MaxInputChannels
-		}
+		p.ChannelCount = min(in.MaxInputChannels, 1)
 		p.SuggestedLatency = in.DefaultHighInputLatency
 		sampleRate = in.DefaultSampleRate
 	}
 	if out != nil {
 		p := &params.Output
 		p.Device = out
-		p.ChannelCount = 2
-		if out.MaxOutputChannels < 2 {
-			p.ChannelCount = out.MaxOutputChannels
-		}
+		p.ChannelCount = min(out.MaxOutputChannels, 2)
 		p.SuggestedLatency = out.DefaultHighOutputLatency
 		if r := out.DefaultSampleRate; r < sampleRate || sampleRate == 0 {
 			sampleRate = r
@@ -216,20 +304,14 @@ func LowLatencyParameters(in, out *DeviceInfo) *StreamParameters {
 	if in != nil {
 		p := &params.Input
 		p.Device = in
-		p.ChannelCount = 1
-		if in.MaxInputChannels < 1 {
-			p.ChannelCount = in.MaxInputChannels
-		}
+		p.ChannelCount = min(in.MaxInputChannels, 1)
 		p.SuggestedLatency = in.DefaultLowInputLatency
 		sampleRate = in.DefaultSampleRate
 	}
 	if out != nil {
 		p := &params.Output
 		p.Device = out
-		p.ChannelCount = 2
-		if out.MaxOutputChannels < 2 {
-			p.ChannelCount = out.MaxOutputChannels
-		}
+		p.ChannelCount = min(out.MaxOutputChannels, 2)
 		p.SuggestedLatency = out.DefaultLowOutputLatency
 		if r := out.DefaultSampleRate; r > sampleRate {
 			sampleRate = r
@@ -241,7 +323,7 @@ func LowLatencyParameters(in, out *DeviceInfo) *StreamParameters {
 }
 
 func paStreamParameters(p StreamDeviceParameters, sampleFormat SampleFormat) *C.PaStreamParameters {
-	if p.Device == nil {
+	if !p.Exists() {
 		return nil
 	}
 	return &C.PaStreamParameters{

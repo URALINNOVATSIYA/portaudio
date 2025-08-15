@@ -19,7 +19,7 @@
             "request": "launch",
             "mode": "debug",
             "cwd": "${workspaceFolder}",
-            "program": "${workspaceFolder}/examples/test.go"
+            "program": "${workspaceFolder}/examples/echo.go"
         }
     ]
 }
