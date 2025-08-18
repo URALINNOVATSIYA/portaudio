@@ -24,7 +24,7 @@ func main() {
 	fmt.Printf("Host API count: %d\n", pa.HostApiCount())
 	fmt.Printf("Default host api: %d\n", pa.DefaultHostApiIndex())
 	fmt.Printf("Default host api info: %#v\n", toString(pa.DefaultHostApi()))
-	fmt.Printf("Sample size of formt Int32: %d", pa.SampleSize(pa.Int32))
+	fmt.Printf("Sample size of formt Int32: %d\n\n", pa.SampleSize(pa.Int32))
 
 	fmt.Println("Sync Echo")
 	echoSync()
@@ -56,11 +56,11 @@ func echoSync() {
 			SuggestedLatency: outputDevice.DefaultHighOutputLatency,
 		},
 		SampleRate:      inputDevice.DefaultSampleRate,
-		SampleFormat:    pa.Int16,
+		SampleFormat:    pa.Float32,
 		FramesPerBuffer: 512,
 		Flags:           pa.ClipOff,
 	}
-	stream, err := pa.OpenStream(params)
+	stream, err := pa.OpenStream(params, nil)
 	check(err)
 	err = stream.Start()
 	check(err)
@@ -76,19 +76,21 @@ func echoSync() {
 }
 
 func echoAsync() {
-	params := pa.HighLatencyParameters(pa.DefaultInputDevice(), pa.DefaultOutputDevice())
+	params := pa.LowLatencyParameters(pa.DefaultInputDevice(), pa.DefaultOutputDevice())
+	params.Input.ChannelCount = 1
+	params.Output.ChannelCount = 1
 	stream, err := pa.OpenStream(
 		params,
-		func(in, out []byte) {
-			for i := range in {
-				out[i] = in[i]
-			}
+		func(in, out []byte, frames int, timeInfo pa.StreamCallbackTimeInfo, statusFlags pa.StreamCallbackFlags) pa.StreamCallbackResult {
+			copy(out, in)
+			return pa.Continue
 		},
 	)
 	check(err)
 	err = stream.Start()
 	check(err)
 	time.Sleep(15 * time.Second)
+	stream.Stop()
 }
 
 func check(err error) {

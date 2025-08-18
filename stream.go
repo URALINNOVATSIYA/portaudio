@@ -3,9 +3,11 @@ package portaudio
 /*
 #cgo pkg-config: portaudio-2.0
 #include <portaudio.h>
+extern PaStreamCallback* paStreamCallback;
 */
 import "C"
 import (
+	"runtime/cgo"
 	"time"
 	"unsafe"
 )
@@ -35,12 +37,19 @@ const (
 
 const FramesPerBufferUnspecified = C.paFramesPerBufferUnspecified
 
-type StreamCallback = func(in, out []byte)
+type StreamCallback = func(
+	in, out []byte,
+	frames int,
+	timeInfo StreamCallbackTimeInfo,
+	statusFlags StreamCallbackFlags,
+) StreamCallbackResult
 
 // StreamCallbackTimeInfo contains timing information for the
 // buffers passed to the stream callback.
 type StreamCallbackTimeInfo struct {
-	InputBufferAdcTime, CurrentTime, OutputBufferDacTime time.Duration
+	InputBufferAdcTime  time.Duration
+	CurrentTime         time.Duration
+	OutputBufferDacTime time.Duration
 }
 
 // StreamCallbackFlags are flag bit constants for the statusFlags to StreamCallback.
@@ -78,6 +87,15 @@ const (
 	PrimingOutput StreamCallbackFlags = C.paPrimingOutput
 )
 
+// Stream callback result
+type StreamCallbackResult = C.PaStreamCallbackResult
+
+const (
+	Continue StreamCallbackResult = C.paContinue
+	Complete StreamCallbackResult = C.paComplete
+	Abort    StreamCallbackResult = C.paAbort
+)
+
 // StreamDeviceParameters specifies parameters for
 // one device (either input or output) in a stream.
 // A nil Device indicates that no device is to be used
@@ -111,6 +129,8 @@ type Stream struct {
 	paStream unsafe.Pointer
 	params   *StreamParameters
 	in, out  []byte
+	inSize   int
+	outSize  int
 	cb       StreamCallback
 }
 
@@ -188,6 +208,9 @@ func (s *Stream) WriteAvailable() (int, error) {
 }
 
 func (s *Stream) Read() ([]byte, error) {
+	if s.cb != nil {
+		return s.in, nil
+	}
 	err := goError(C.Pa_ReadStream(s.paStream, unsafe.Pointer(&s.in[0]), C.ulong(s.params.FramesPerBuffer)))
 	if err != nil {
 		return nil, err
@@ -196,13 +219,9 @@ func (s *Stream) Read() ([]byte, error) {
 }
 
 func (s *Stream) Write(data []byte) error {
-	size := len(data) - 1
-	for i := range s.out {
-		if i > size {
-			break
-		} else {
-			s.out[i] = data[i]
-		}
+	copy(s.out, data[:len(s.out)])
+	if s.cb != nil {
+		return nil
 	}
 	err := goError(C.Pa_WriteStream(s.paStream, unsafe.Pointer(&s.out[0]), C.ulong(s.params.FramesPerBuffer)))
 	if err != nil {
@@ -214,11 +233,21 @@ func (s *Stream) Write(data []byte) error {
 	return nil
 }
 
+func (s *Stream) Callback() StreamCallback {
+	return s.cb
+}
+
 func OpenStream(params *StreamParameters, cb StreamCallback) (*Stream, error) {
 	s := newStream(params)
 	inParams := paStreamParameters(params.Input, params.SampleFormat)
 	outParams := paStreamParameters(params.Output, params.SampleFormat)
-
+	scb := C.paStreamCallback
+	if cb == nil {
+		scb = nil
+	} else {
+		s.cb = cb
+	}
+	sptr := cgo.NewHandle(s)
 	err := goError(
 		C.Pa_OpenStream(
 			&s.paStream,
@@ -227,18 +256,20 @@ func OpenStream(params *StreamParameters, cb StreamCallback) (*Stream, error) {
 			C.double(params.SampleRate),
 			C.ulong(params.FramesPerBuffer),
 			C.PaStreamFlags(params.Flags),
-			nil,
-			nil,
+			scb,
+			unsafe.Pointer(&sptr),
 		),
 	)
 	if err != nil {
-		s.cb = cb
 		return nil, err
 	}
+	sampleSize := SampleSize(params.SampleFormat)
 	if cb != nil {
+		s.inSize = sampleSize * params.Input.ChannelCount
+		s.outSize = sampleSize * params.Output.ChannelCount
 		return s, nil
 	}
-	size := SampleSize(params.SampleFormat) * int(params.FramesPerBuffer)
+	size := sampleSize * int(params.FramesPerBuffer)
 	if params.Input.Exists() {
 		s.in = make([]byte, size*params.Input.ChannelCount)
 	}
@@ -258,6 +289,30 @@ func OpenDefaultStream(
 	//s := newStream()
 
 	return nil, nil
+}
+
+//export streamCallback
+func streamCallback(
+	inputBuffer, outputBuffer unsafe.Pointer,
+	frames C.ulong,
+	timeInfo *C.PaStreamCallbackTimeInfo,
+	statusFlags C.PaStreamCallbackFlags,
+	userData unsafe.Pointer,
+) C.PaStreamCallbackResult {
+	size := int(frames)
+	s := *(*cgo.Handle)(userData).Value().(*Stream)
+	s.in = unsafe.Slice((*byte)(inputBuffer), size * s.inSize)
+	s.out = unsafe.Slice((*byte)(outputBuffer), size * s.outSize)
+	return s.cb(
+		s.in, s.out,
+		size,
+		StreamCallbackTimeInfo{
+			duration(timeInfo.inputBufferAdcTime),
+			duration(timeInfo.currentTime),
+			duration(timeInfo.outputBufferDacTime),
+		},
+		StreamCallbackFlags(statusFlags),
+	)
 }
 
 // SampleSize returns the size of a given sample format in bytes or 0 on error.
@@ -292,6 +347,7 @@ func HighLatencyParameters(in, out *DeviceInfo) *StreamParameters {
 	}
 	params.SampleRate = sampleRate
 	params.FramesPerBuffer = FramesPerBufferUnspecified
+	params.SampleFormat = Float32
 	return params
 }
 
@@ -319,6 +375,7 @@ func LowLatencyParameters(in, out *DeviceInfo) *StreamParameters {
 	}
 	params.SampleRate = sampleRate
 	params.FramesPerBuffer = FramesPerBufferUnspecified
+	params.SampleFormat = Float32
 	return params
 }
 
