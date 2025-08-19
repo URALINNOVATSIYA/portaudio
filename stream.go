@@ -497,12 +497,12 @@ func streamCallback(
 		s.in = unsafe.Slice((*byte)(inputBuffer), s.frameCount*s.inSize)
 		s.out = unsafe.Slice((*byte)(outputBuffer), s.frameCount*s.outSize)
 	} else {
-		size := s.frameCount*s.outSize
+		size := s.frameCount * s.outSize
 		outPtrs := unsafe.Slice((*unsafe.Pointer)(inputBuffer), s.params.Input.ChannelCount)
 		for i := range outPtrs {
 			s.outS[i] = unsafe.Slice((*byte)(outPtrs[i]), size)
 		}
-		size = s.frameCount*s.outSize
+		size = s.frameCount * s.outSize
 		outPtrs = unsafe.Slice((*unsafe.Pointer)(outputBuffer), s.params.Output.ChannelCount)
 		for i := range outPtrs {
 			s.outS[i] = unsafe.Slice((*byte)(outPtrs[i]), size)
