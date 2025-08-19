@@ -53,7 +53,7 @@ func main() {
 }
 
 func playStereo() {
-	stream := newStereoSine(256, 320)
+	stream := newStereoSine(128, 320)
 	check(stream.Start())
 	defer stream.Close()
 	time.Sleep(5 * time.Second)
