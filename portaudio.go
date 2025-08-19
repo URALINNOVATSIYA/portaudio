@@ -14,12 +14,6 @@ import (
 type Error C.PaError
 
 func (err Error) Error() string {
-	if err == NoDefaultInputDevice {
-		return "no default input device"
-	}
-	if err == NoDefaultOutputDevice {
-		return "no default output device"
-	}
 	return C.GoString(C.Pa_GetErrorText(C.PaError(err)))
 }
 
@@ -53,8 +47,7 @@ const (
 	CanNotWriteToAnInputOnlyStream        Error = C.paCanNotWriteToAnInputOnlyStream
 	IncompatibleStreamHostApi             Error = C.paIncompatibleStreamHostApi
 	BadBufferPtr                          Error = C.paBadBufferPtr
-	NoDefaultInputDevice                  Error = -1
-	NoDefaultOutputDevice                 Error = -2
+	NoDevice                              Error = C.paNoDevice
 )
 
 var initialized = 0

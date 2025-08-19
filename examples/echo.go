@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -10,34 +9,14 @@ import (
 )
 
 func main() {
-	err := pa.Initialize()
-	check(err)
-
-	fmt.Printf("Version number: %d\n", pa.VersionNumber())
-	fmt.Printf("Version text: %s\n", pa.VersionText())
-	fmt.Printf("Version info: %#v\n", toString(pa.Version()))
-	fmt.Printf("Device count: %d\n", pa.DeviceCount())
-	fmt.Printf("Default input device: %d\n", pa.DefaultInputDeviceIndex())
-	fmt.Printf("Default output device: %d\n", pa.DefaultOutputDeviceIndex())
-	fmt.Printf("Default input device info: %#v\n", toString(pa.DefaultInputDevice()))
-	fmt.Printf("Default output device info: %#v\n", toString(pa.DefaultOutputDevice()))
-	fmt.Printf("Host API count: %d\n", pa.HostApiCount())
-	fmt.Printf("Default host api: %d\n", pa.DefaultHostApiIndex())
-	fmt.Printf("Default host api info: %#v\n", toString(pa.DefaultHostApi()))
-	fmt.Printf("Sample size of formt Int32: %d\n\n", pa.SampleSize(pa.Int32))
+	check(pa.Initialize())
 
 	fmt.Println("Sync Echo")
 	echoSync()
 	fmt.Println("Async Echo")
 	echoAsync()
 
-	err = pa.Terminate()
-	check(err)
-}
-
-func toString(v any) string {
-	json, _ := json.Marshal(v)
-	return string(json)
+	check(pa.Terminate())
 }
 
 func echoSync() {
@@ -60,10 +39,10 @@ func echoSync() {
 		FramesPerBuffer: 512,
 		Flags:           pa.ClipOff,
 	}
-	stream, err := pa.OpenStream(params, nil)
+	stream, err := pa.OpenStream(params, nil, nil)
 	check(err)
-	err = stream.Start()
-	check(err)
+	check(stream.Start())
+	defer stream.Close()
 	var sampleBlock []byte
 	const seconds = 15
 	for i, max := 0, int(seconds*params.SampleRate/float64(params.FramesPerBuffer)); i < max; i++ {
@@ -72,25 +51,26 @@ func echoSync() {
 		err = stream.Write(sampleBlock)
 		check(err)
 	}
-	stream.Stop()
+	check(stream.Stop())
 }
 
 func echoAsync() {
-	params := pa.LowLatencyParameters(pa.DefaultInputDevice(), pa.DefaultOutputDevice())
+	params := pa.DefaultLowLatencyParameters()
 	params.Input.ChannelCount = 1
 	params.Output.ChannelCount = 1
 	stream, err := pa.OpenStream(
 		params,
-		func(in, out []byte, frames int, timeInfo pa.StreamCallbackTimeInfo, statusFlags pa.StreamCallbackFlags) pa.StreamCallbackResult {
-			copy(out, in)
+		func(s *pa.Stream) pa.StreamCallbackResult {
+			copy(s.Out(), s.In())
 			return pa.Continue
 		},
+		nil,
 	)
 	check(err)
-	err = stream.Start()
-	check(err)
+	check(stream.Start())
+	defer stream.Close()
 	time.Sleep(15 * time.Second)
-	stream.Stop()
+	check(stream.Stop())
 }
 
 func check(err error) {

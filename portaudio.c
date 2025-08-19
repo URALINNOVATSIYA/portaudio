@@ -6,3 +6,4 @@ int cb(const void *inputBuffer, void *outputBuffer, unsigned long frames, const 
 
 //using a variable ensures that the callback signature is checked
 PaStreamCallback* paStreamCallback = cb;
+PaStreamFinishedCallback* paStreamFinishedCallback = streamFinishedCallback;

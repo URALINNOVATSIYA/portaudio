@@ -4,9 +4,11 @@ package portaudio
 #cgo pkg-config: portaudio-2.0
 #include <portaudio.h>
 extern PaStreamCallback* paStreamCallback;
+extern PaStreamFinishedCallback* paStreamFinishedCallback;
 */
 import "C"
 import (
+	"fmt"
 	"runtime/cgo"
 	"time"
 	"unsafe"
@@ -25,24 +27,29 @@ const (
 
 type SampleFormat C.PaSampleFormat
 
+func (f SampleFormat) IsInterleaved() bool {
+	return f&NonInterleaved == 0
+}
+
+func (f SampleFormat) IsNonInterleaved() bool {
+	return f&NonInterleaved != 0
+}
+
 const (
-	Float32 SampleFormat = C.paFloat32
-	Int32   SampleFormat = C.paInt32
-	Int24   SampleFormat = C.paInt24
-	Int16   SampleFormat = C.paInt16
-	Int8    SampleFormat = C.paInt8
-	UInt8   SampleFormat = C.paUInt8
-	Byte    SampleFormat = C.paUInt8
+	NonInterleaved SampleFormat = C.paNonInterleaved
+	Float32        SampleFormat = C.paFloat32
+	Int32          SampleFormat = C.paInt32
+	Int24          SampleFormat = C.paInt24
+	Int16          SampleFormat = C.paInt16
+	Int8           SampleFormat = C.paInt8
+	UInt8          SampleFormat = C.paUInt8
+	Byte           SampleFormat = C.paUInt8
 )
 
 const FramesPerBufferUnspecified = C.paFramesPerBufferUnspecified
 
-type StreamCallback = func(
-	in, out []byte,
-	frames int,
-	timeInfo StreamCallbackTimeInfo,
-	statusFlags StreamCallbackFlags,
-) StreamCallbackResult
+type StreamFinishedCallback = func(*Stream)
+type StreamCallback = func(*Stream) StreamCallbackResult
 
 // StreamCallbackTimeInfo contains timing information for the
 // buffers passed to the stream callback.
@@ -91,9 +98,12 @@ const (
 type StreamCallbackResult = C.PaStreamCallbackResult
 
 const (
+	// Signal that the stream should continue invoking the callback and processing audio.
 	Continue StreamCallbackResult = C.paContinue
+	// Signal that the stream should stop invoking the callback and finish once all output samples have played.
 	Complete StreamCallbackResult = C.paComplete
-	Abort    StreamCallbackResult = C.paAbort
+	// Signal that the stream should stop invoking the callback and finish as soon as possible.
+	Abort StreamCallbackResult = C.paAbort
 )
 
 // StreamDeviceParameters specifies parameters for
@@ -126,18 +136,105 @@ type StreamInfo struct {
 }
 
 type Stream struct {
-	paStream unsafe.Pointer
-	params   *StreamParameters
-	in, out  []byte
-	inSize   int
-	outSize  int
-	cb       StreamCallback
+	paStream         unsafe.Pointer
+	params           *StreamParameters
+	in, out          []byte
+	inS, outS        [][]byte
+	inSize, outSize  int
+	frameCount       int
+	timeInfo         StreamCallbackTimeInfo
+	statusFlags      StreamCallbackFlags
+	callback         StreamCallback
+	finishedCallback StreamFinishedCallback
 }
 
 func newStream(params *StreamParameters) *Stream {
 	return &Stream{
 		params: params,
 	}
+}
+
+// OpenStream opens a stream for either input, output or both.
+func OpenStream(
+	params *StreamParameters,
+	callback StreamCallback,
+	finishedCallback StreamFinishedCallback,
+) (*Stream, error) {
+	s := newStream(params)
+	inParams := paStreamParameters(params.Input, params.SampleFormat)
+	outParams := paStreamParameters(params.Output, params.SampleFormat)
+	scb := C.paStreamCallback
+	if callback == nil {
+		scb = nil
+	} else {
+		s.callback = callback
+	}
+	sptr := cgo.NewHandle(s)
+	err := goError(
+		C.Pa_OpenStream(
+			&s.paStream,
+			inParams,
+			outParams,
+			C.double(params.SampleRate),
+			C.ulong(params.FramesPerBuffer),
+			C.PaStreamFlags(params.Flags),
+			scb,
+			unsafe.Pointer(&sptr),
+		),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if finishedCallback != nil {
+		if err = s.SetFinishedCallback(finishedCallback); err != nil {
+			return nil, err
+		}
+	}
+	sampleSize := SampleSize(params.SampleFormat)
+	if callback != nil {
+		if params.SampleFormat.IsNonInterleaved() {
+			if params.Input.Exists() {
+				s.inSize = sampleSize
+				s.inS = make([][]byte, params.Input.ChannelCount)
+			}
+			if params.Output.Exists() {
+				s.outSize = sampleSize
+				s.outS = make([][]byte, params.Output.ChannelCount)
+			}
+			return s, nil
+		}
+		if params.Input.Exists() {
+			s.inSize = sampleSize * params.Input.ChannelCount
+		}
+		if params.Output.Exists() {
+			s.outSize = sampleSize * params.Output.ChannelCount
+		}
+		return s, nil
+	}
+	size := sampleSize * int(params.FramesPerBuffer)
+	if params.Input.Exists() {
+		s.in = make([]byte, size*params.Input.ChannelCount)
+	}
+	if params.Output.Exists() {
+		s.out = make([]byte, size*params.Output.ChannelCount)
+	}
+	return s, nil
+}
+
+// IsActive determines whether the stream is active. A stream is active after
+// a successful call to Start(), until it becomes inactive either as
+// a result of a call to Stop() or Abort(), or as a result of a return value other
+// than Continue from the stream callback. In the latter case, the stream is considered
+// inactive after the last buffer has finished playing.
+func (s *Stream) IsActive() bool {
+	return int(C.Pa_IsStreamActive(s.paStream)) == 1
+}
+
+// IsStopped determines whether the stream is stopped. A stream is considered to be stopped
+// prior to a successful call to Start() and after a successful call to Stop() or Abort().
+// If a stream callback returns a value other than Continue the stream is NOT considered to be stopped.
+func (s *Stream) IsStopped() bool {
+	return int(C.Pa_IsStreamStopped(s.paStream)) == 1
 }
 
 // CpuLoad returns CPU usage information for the stream.
@@ -166,6 +263,36 @@ func (s *Stream) Info() *StreamInfo {
 		duration(info.outputLatency),
 		float64(info.sampleRate),
 	}
+}
+
+func (s *Stream) FrameCount() int {
+	return s.frameCount
+}
+
+func (s *Stream) StatusFlags() StreamCallbackFlags {
+	return s.statusFlags
+}
+
+func (s *Stream) TimeInfo() StreamCallbackTimeInfo {
+	return s.timeInfo
+}
+
+func (s *Stream) Callback() StreamCallback {
+	return s.callback
+}
+
+func (s *Stream) FinishedCallback() StreamFinishedCallback {
+	return s.finishedCallback
+}
+
+func (s *Stream) SetFinishedCallback(callback StreamFinishedCallback) error {
+	cb := C.paStreamFinishedCallback
+	if callback == nil {
+		cb = nil
+	} else {
+		s.finishedCallback = callback
+	}
+	return goError(C.Pa_SetStreamFinishedCallback(s.paStream, cb))
 }
 
 // Start commences audio processing.
@@ -207,8 +334,26 @@ func (s *Stream) WriteAvailable() (int, error) {
 	return int(size), nil
 }
 
+func (s *Stream) InS() [][]byte {
+	return s.inS
+}
+
+func (s *Stream) OutS() [][]byte {
+	return s.outS
+}
+
+func (s *Stream) In() []byte {
+	return s.in
+}
+
+func (s *Stream) Out() []byte {
+	return s.out
+}
+
+// Read reads samples from an input stream. The function doesn't return until the entire buffer
+// has been filled - this may involve waiting for the operating system to supply the data.
 func (s *Stream) Read() ([]byte, error) {
-	if s.cb != nil {
+	if s.callback != nil {
 		return s.in, nil
 	}
 	err := goError(C.Pa_ReadStream(s.paStream, unsafe.Pointer(&s.in[0]), C.ulong(s.params.FramesPerBuffer)))
@@ -218,9 +363,11 @@ func (s *Stream) Read() ([]byte, error) {
 	return s.in, nil
 }
 
+// Write writes samples to an output stream. This function doesn't return until the entire buffer
+// has been written - this may involve waiting for the operating system to consume the data.
 func (s *Stream) Write(data []byte) error {
 	copy(s.out, data[:len(s.out)])
-	if s.cb != nil {
+	if s.callback != nil {
 		return nil
 	}
 	err := goError(C.Pa_WriteStream(s.paStream, unsafe.Pointer(&s.out[0]), C.ulong(s.params.FramesPerBuffer)))
@@ -233,94 +380,16 @@ func (s *Stream) Write(data []byte) error {
 	return nil
 }
 
-func (s *Stream) Callback() StreamCallback {
-	return s.cb
-}
-
-func OpenStream(params *StreamParameters, cb StreamCallback) (*Stream, error) {
-	s := newStream(params)
-	inParams := paStreamParameters(params.Input, params.SampleFormat)
-	outParams := paStreamParameters(params.Output, params.SampleFormat)
-	scb := C.paStreamCallback
-	if cb == nil {
-		scb = nil
-	} else {
-		s.cb = cb
-	}
-	sptr := cgo.NewHandle(s)
-	err := goError(
-		C.Pa_OpenStream(
-			&s.paStream,
-			inParams,
-			outParams,
-			C.double(params.SampleRate),
-			C.ulong(params.FramesPerBuffer),
-			C.PaStreamFlags(params.Flags),
-			scb,
-			unsafe.Pointer(&sptr),
-		),
-	)
-	if err != nil {
-		return nil, err
-	}
-	sampleSize := SampleSize(params.SampleFormat)
-	if cb != nil {
-		s.inSize = sampleSize * params.Input.ChannelCount
-		s.outSize = sampleSize * params.Output.ChannelCount
-		return s, nil
-	}
-	size := sampleSize * int(params.FramesPerBuffer)
-	if params.Input.Exists() {
-		s.in = make([]byte, size*params.Input.ChannelCount)
-	}
-	if params.Output.Exists() {
-		s.out = make([]byte, size*params.Output.ChannelCount)
-	}
-	return s, nil
-}
-
-// OpenDefaultStream is a simplified version of OpenStream() that opens the default input and/or output devices.
-func OpenDefaultStream(
-	numInputChannels, numOutputChannels int,
-	sampleFormat SampleFormat,
-	sampleRate float64,
-	framesPerBuffer uint64,
-) (*Stream, error) {
-	//s := newStream()
-
-	return nil, nil
-}
-
-//export streamCallback
-func streamCallback(
-	inputBuffer, outputBuffer unsafe.Pointer,
-	frames C.ulong,
-	timeInfo *C.PaStreamCallbackTimeInfo,
-	statusFlags C.PaStreamCallbackFlags,
-	userData unsafe.Pointer,
-) C.PaStreamCallbackResult {
-	size := int(frames)
-	s := *(*cgo.Handle)(userData).Value().(*Stream)
-	s.in = unsafe.Slice((*byte)(inputBuffer), size * s.inSize)
-	s.out = unsafe.Slice((*byte)(outputBuffer), size * s.outSize)
-	return s.cb(
-		s.in, s.out,
-		size,
-		StreamCallbackTimeInfo{
-			duration(timeInfo.inputBufferAdcTime),
-			duration(timeInfo.currentTime),
-			duration(timeInfo.outputBufferDacTime),
-		},
-		StreamCallbackFlags(statusFlags),
-	)
-}
-
 // SampleSize returns the size of a given sample format in bytes or 0 on error.
 func SampleSize(format SampleFormat) int {
 	if size := C.Pa_GetSampleSize(C.PaSampleFormat(format)); size >= 0 {
 		return int(size)
 	}
 	return 0
+}
+
+func DefaultHighLatencyParameters() *StreamParameters {
+	return HighLatencyParameters(DefaultInputDevice(), DefaultOutputDevice())
 }
 
 // HighLatencyParameters are mono in, stereo out (if supported),
@@ -351,6 +420,10 @@ func HighLatencyParameters(in, out *DeviceInfo) *StreamParameters {
 	return params
 }
 
+func DefaultLowLatencyParameters() *StreamParameters {
+	return LowLatencyParameters(DefaultInputDevice(), DefaultOutputDevice())
+}
+
 // LowLatencyParameters are mono in, stereo out (if supported),
 // low latency, the larger of the default sample rates of the two devices,
 // and FramesPerBufferUnspecified. One of the devices may be nil.
@@ -379,6 +452,20 @@ func LowLatencyParameters(in, out *DeviceInfo) *StreamParameters {
 	return params
 }
 
+// IsFormatSupported determines whether it would be possible to open a stream with the specified parameters.
+// Input device must be nil for output-only streams and
+// output device must be nil for input-only streams respectively.
+// Returns true if the format is supported, and false otherwise.
+func IsFormatSupported(params *StreamParameters) bool {
+	return goError(
+		C.Pa_IsFormatSupported(
+			paStreamParameters(params.Input, params.SampleFormat),
+			paStreamParameters(params.Output, params.SampleFormat),
+			C.double(params.SampleRate),
+		),
+	) == nil
+}
+
 func paStreamParameters(p StreamDeviceParameters, sampleFormat SampleFormat) *C.PaStreamParameters {
 	if !p.Exists() {
 		return nil
@@ -389,4 +476,46 @@ func paStreamParameters(p StreamDeviceParameters, sampleFormat SampleFormat) *C.
 		sampleFormat:     C.PaSampleFormat(sampleFormat),
 		suggestedLatency: C.PaTime(p.SuggestedLatency.Seconds()),
 	}
+}
+
+//export streamCallback
+func streamCallback(
+	inputBuffer, outputBuffer unsafe.Pointer,
+	frameCount C.ulong,
+	timeInfo *C.PaStreamCallbackTimeInfo,
+	statusFlags C.PaStreamCallbackFlags,
+	userData unsafe.Pointer,
+) C.PaStreamCallbackResult {
+	s := (*cgo.Handle)(userData).Value().(*Stream)
+	s.statusFlags = StreamCallbackFlags(statusFlags)
+	s.timeInfo = StreamCallbackTimeInfo{
+		duration(timeInfo.inputBufferAdcTime),
+		duration(timeInfo.currentTime),
+		duration(timeInfo.outputBufferDacTime),
+	}
+	s.frameCount = int(frameCount)
+	if s.params.SampleFormat.IsInterleaved() {
+		if uintptr(inputBuffer) != 0 {
+			s.in = unsafe.Slice((*byte)(inputBuffer), s.frameCount*s.inSize)
+		}
+		if uintptr(outputBuffer) != 0 {
+			s.out = unsafe.Slice((*byte)(outputBuffer), s.frameCount*s.outSize)
+		}
+	} else {
+		size := s.frameCount*s.outSize
+		//outPtrs := unsafe.Slice((*unsafe.Pointer)(outputBuffer), s.params.Output.ChannelCount)
+		//for i := range outPtrs {
+		fmt.Println(*(*unsafe.Pointer)(outputBuffer))
+		fmt.Println(*(*unsafe.Pointer)(unsafe.Pointer(uintptr(outputBuffer) + unsafe.Sizeof(uintptr(0)))))
+		s.outS[0] = unsafe.Slice((*byte)(*(*unsafe.Pointer)(outputBuffer)), size)
+		s.outS[1] = unsafe.Slice((*byte)(*(*unsafe.Pointer)(unsafe.Pointer(uintptr(outputBuffer) + unsafe.Sizeof(uintptr(0))))), size)
+		//}
+	}
+	return s.callback(s)
+}
+
+//export streamFinishedCallback
+func streamFinishedCallback(userData unsafe.Pointer) {
+	s := (*cgo.Handle)(userData).Value().(*Stream)
+	s.finishedCallback(s)
 }
