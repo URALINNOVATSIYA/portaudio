@@ -168,7 +168,7 @@ func OpenStream(
 	} else {
 		s.callback = callback
 	}
-	sptr := cgo.NewHandle(s)
+	sid := cgo.NewHandle(s)
 	err := goError(
 		C.Pa_OpenStream(
 			&s.paStream,
@@ -178,7 +178,7 @@ func OpenStream(
 			C.ulong(params.FramesPerBuffer),
 			C.PaStreamFlags(params.Flags),
 			scb,
-			unsafe.Pointer(&sptr),
+			unsafe.Pointer(sid),
 		),
 	)
 	if err != nil {
@@ -485,7 +485,7 @@ func streamCallback(
 	statusFlags C.PaStreamCallbackFlags,
 	userData unsafe.Pointer,
 ) C.PaStreamCallbackResult {
-	s := (*cgo.Handle)(userData).Value().(*Stream)
+	s := (cgo.Handle)(userData).Value().(*Stream)
 	s.statusFlags = StreamCallbackFlags(statusFlags)
 	s.timeInfo = StreamCallbackTimeInfo{
 		duration(timeInfo.inputBufferAdcTime),
@@ -513,6 +513,6 @@ func streamCallback(
 
 //export streamFinishedCallback
 func streamFinishedCallback(userData unsafe.Pointer) {
-	s := (*cgo.Handle)(userData).Value().(*Stream)
+	s := (cgo.Handle)(userData).Value().(*Stream)
 	s.finishedCallback(s)
 }
