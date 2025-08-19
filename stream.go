@@ -8,7 +8,6 @@ extern PaStreamFinishedCallback* paStreamFinishedCallback;
 */
 import "C"
 import (
-	"fmt"
 	"runtime/cgo"
 	"time"
 	"unsafe"
@@ -495,21 +494,19 @@ func streamCallback(
 	}
 	s.frameCount = int(frameCount)
 	if s.params.SampleFormat.IsInterleaved() {
-		if uintptr(inputBuffer) != 0 {
-			s.in = unsafe.Slice((*byte)(inputBuffer), s.frameCount*s.inSize)
-		}
-		if uintptr(outputBuffer) != 0 {
-			s.out = unsafe.Slice((*byte)(outputBuffer), s.frameCount*s.outSize)
-		}
+		s.in = unsafe.Slice((*byte)(inputBuffer), s.frameCount*s.inSize)
+		s.out = unsafe.Slice((*byte)(outputBuffer), s.frameCount*s.outSize)
 	} else {
 		size := s.frameCount*s.outSize
-		//outPtrs := unsafe.Slice((*unsafe.Pointer)(outputBuffer), s.params.Output.ChannelCount)
-		//for i := range outPtrs {
-		fmt.Println(*(*unsafe.Pointer)(outputBuffer))
-		fmt.Println(*(*unsafe.Pointer)(unsafe.Pointer(uintptr(outputBuffer) + unsafe.Sizeof(uintptr(0)))))
-		s.outS[0] = unsafe.Slice((*byte)(*(*unsafe.Pointer)(outputBuffer)), size)
-		s.outS[1] = unsafe.Slice((*byte)(*(*unsafe.Pointer)(unsafe.Pointer(uintptr(outputBuffer) + unsafe.Sizeof(uintptr(0))))), size)
-		//}
+		outPtrs := unsafe.Slice((*unsafe.Pointer)(inputBuffer), s.params.Input.ChannelCount)
+		for i := range outPtrs {
+			s.outS[i] = unsafe.Slice((*byte)(outPtrs[i]), size)
+		}
+		size = s.frameCount*s.outSize
+		outPtrs = unsafe.Slice((*unsafe.Pointer)(outputBuffer), s.params.Output.ChannelCount)
+		for i := range outPtrs {
+			s.outS[i] = unsafe.Slice((*byte)(outPtrs[i]), size)
+		}
 	}
 	return s.callback(s)
 }
