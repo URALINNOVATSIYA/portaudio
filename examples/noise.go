@@ -21,14 +21,14 @@ func noise() {
 	params := pa.HighLatencyParameters(nil, pa.DefaultOutputDevice())
 	stream, err := pa.OpenStream(
 		params,
-		func(s *pa.Stream) pa.StreamCallbackResult {
+		func(s *pa.Stream[uint32]) pa.StreamCallbackResult {
 			out := s.Out()
 			for i := range s.Out() {
-				out[i] = byte(rand.Uint32())
+				out[i] = rand.Uint32()
 			}
 			return pa.Continue
 		},
-		func(s *pa.Stream) {
+		func(s *pa.Stream[uint32]) {
 			fmt.Println("Stream is finished!")
 		},
 	)

@@ -9,7 +9,7 @@ import (
 )
 
 type stereoSine struct {
-	*pa.Stream
+	*pa.Stream[float32]
 	stepL, phaseL float64
 	stepR, phaseR float64
 }
@@ -25,20 +25,12 @@ func newStereoSine(freqL, freqR float64) *stereoSine {
 	return s
 }
 
-func (g *stereoSine) processAudio(s *pa.Stream) pa.StreamCallbackResult {
+func (g *stereoSine) processAudio(s *pa.Stream[float32]) pa.StreamCallbackResult {
 	out := s.OutS()
-	for i, max := 0, len(out[0]); i < max; i += 4 {
-		x := math.Float32bits(float32(math.Sin(2 * math.Pi * g.phaseL)))
-		out[0][i] = byte(x)
-		out[0][i+1] = byte(x >> 8)
-		out[0][i+2] = byte(x >> 16)
-		out[0][i+3] = byte(x >> 24)
+	for i := range out[0] {
+		out[0][i] = float32(math.Sin(2 * math.Pi * g.phaseL))
 		_, g.phaseL = math.Modf(g.phaseL + g.stepL)
-		x = math.Float32bits(float32(math.Sin(2 * math.Pi * g.phaseR)))
-		out[1][i] = byte(x)
-		out[1][i+1] = byte(x >> 8)
-		out[1][i+2] = byte(x >> 16)
-		out[1][i+3] = byte(x >> 24)
+		out[1][i] = float32(math.Sin(2 * math.Pi * g.phaseR))
 		_, g.phaseR = math.Modf(g.phaseR + g.stepR)
 	}
 	return pa.Continue

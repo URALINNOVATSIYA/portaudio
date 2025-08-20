@@ -35,18 +35,17 @@ func echoSync() {
 			SuggestedLatency: outputDevice.DefaultHighOutputLatency,
 		},
 		SampleRate:      inputDevice.DefaultSampleRate,
-		SampleFormat:    pa.Float32,
+		SampleFormat:    pa.Int16,
 		FramesPerBuffer: 512,
 		Flags:           pa.ClipOff,
 	}
-	stream, err := pa.OpenStream(params, nil, nil)
+	stream, err := pa.OpenStream[uint16](params, nil, nil)
 	check(err)
 	check(stream.Start())
 	defer stream.Close()
-	var sampleBlock []byte
-	const seconds = 15
+	seconds := 15.
 	for i, max := 0, int(seconds*params.SampleRate/float64(params.FramesPerBuffer)); i < max; i++ {
-		sampleBlock, err = stream.Read()
+		sampleBlock, err := stream.Read()
 		check(err)
 		err = stream.Write(sampleBlock)
 		check(err)
@@ -60,7 +59,7 @@ func echoAsync() {
 	params.Output.ChannelCount = 1
 	stream, err := pa.OpenStream(
 		params,
-		func(s *pa.Stream) pa.StreamCallbackResult {
+		func(s *pa.Stream[float32]) pa.StreamCallbackResult {
 			copy(s.Out(), s.In())
 			return pa.Continue
 		},
